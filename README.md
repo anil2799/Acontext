@@ -48,10 +48,10 @@ Acontext can help you:
 
 # 💡 Core Features
 
-- Context Engineering
-  - [Session](https://docs.acontext.io/store/messages/multi-provider): Multi-modal LLM Message Storage
-  - [Disk](https://docs.acontext.io/store/disk): Filesystem for artifacts
-  - [Context Editing](https://docs.acontext.io/store/editing) - Context Engineering in one call
+- **Context Engineering**
+  - [Session](https://docs.acontext.io/store/messages/multi-provider): unified message storage for any llm, any modal.
+  - [Disk](https://docs.acontext.io/store/disk): save/download artifacts with file path.
+  - [Context Editing](https://docs.acontext.io/store/editing) - manage your context window in one api.
 
 <div align="center">
     <picture>
@@ -61,9 +61,9 @@ Acontext can help you:
 </div>
 
 - **Observe agent tasks and user feedback**
-  - [Task Agent](https://docs.acontext.io/observe/agent_tasks) - Background agent that collects task's status, progress and preferences
-- **Enable agent self-learning**
-  - [Experience Agent](https://docs.acontext.io/learn/advance/experience-agent) - Background agents that distill, save and search skills for each user.
+  - [Task](https://docs.acontext.io/observe/agent_tasks): collect agent's working status, progress and preferences in near real-time.
+- **Agent self-learning**
+  - [Experience](https://docs.acontext.io/learn/advance/experience-agent): let agent learns SOPs for each user.
 - **View everything in one [dashboard](https://docs.acontext.io/observe/dashboard)**
 
 <div align="center">
@@ -229,7 +229,9 @@ mkdir acontext_server && cd acontext_server
 acontext docker up
 ```
 
-> [📖 local setup](https://docs.acontext.io/local#start-acontext-server-locally) We recommend `gpt-4.1` as the LLM model
+> [!IMPORTANT]
+>
+> Make sure your LLM has the ability to [call tools](https://platform.openai.com/docs/guides/function-calling). By default, Acontext will use `gpt-4.1`.
 
 `acontext docker up` will create/use  `.env` and `config.yaml` for Acontext, and create a `db` folder to persist data.
 
