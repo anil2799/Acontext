@@ -464,7 +464,7 @@ class AsyncSingleThreadMQConsumer:
         except asyncio.CancelledError:
             pass
         except ChannelInvalidStateError as e:
-            LOG.warning(f"Message channel invalid: {e}")
+            LOG.warning(f"Message channel invalid: {e}. {traceback.format_exc()}")
         except Exception as e:
             LOG.error(f"Message task unknown error: {e}, {traceback.format_exc()}")
         finally:
