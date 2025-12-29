@@ -5,6 +5,7 @@ import asyncio
 import json
 import traceback
 from enum import StrEnum
+from functools import partial
 from pydantic import ValidationError, BaseModel
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable, Any, Dict, Optional, List, Set, Tuple
@@ -458,18 +459,41 @@ class AsyncSingleThreadMQConsumer:
             if span:
                 span.end()
 
-    def cleanup_message_task(self, task: asyncio.Task) -> None:
+    def cleanup_message_task(self, consumer_name: str, task: asyncio.Task) -> None:
         try:
             task.result()
         except asyncio.CancelledError:
             pass
         except ChannelInvalidStateError as e:
-            LOG.warning(f"Message channel invalid: {e}. {traceback.format_exc()}")
+            LOG.warning(
+                f"{consumer_name}: Message channel invalid: {e}. {traceback.format_exc()}"
+            )
         except Exception as e:
-            LOG.error(f"Message task unknown error: {e}, {traceback.format_exc()}")
+            LOG.error(
+                f"{consumer_name}: Message task unknown error: {e}, {traceback.format_exc()}"
+            )
         finally:
             self._processing_tasks.discard(task)
             LOG.debug(f"#Current Processing Tasks: {len(self._processing_tasks)}")
+
+    async def _process_message_with_tracing(
+        self, config: ConsumerConfig, message: Message
+    ) -> None:
+        """Process a message with OpenTelemetry tracing support."""
+        # Extract trace context from message headers if available
+        extracted_context = _extract_trace_context_from_headers(message)
+
+        # Create span for message consumption if OpenTelemetry is enabled
+        consume_span, consume_context = _create_consume_span(
+            config, message, extracted_context
+        )
+
+        try:
+            # Pass consume_context to process_message so it can create child spans
+            return await self._process_message(config, message, consume_context)
+        finally:
+            if consume_span:
+                consume_span.end()
 
     async def _special_queue(self, config: ConsumerConfig) -> str:
         if config.handler is SpecialHandler.NO_PROCESS:
@@ -515,29 +539,16 @@ class AsyncSingleThreadMQConsumer:
                             break
 
                         # Process message in background task for concurrency
-                        async def process_with_tracing():
-                            # Extract trace context from message headers if available
-                            extracted_context = _extract_trace_context_from_headers(
-                                message
-                            )
-
-                            # Create span for message consumption if OpenTelemetry is enabled
-                            consume_span, consume_context = _create_consume_span(
-                                config, message, extracted_context
-                            )
-
-                            try:
-                                # Pass consume_context to process_message so it can create child spans
-                                return await self._process_message(
-                                    config, message, consume_context
-                                )
-                            finally:
-                                if consume_span:
-                                    consume_span.end()
-
-                        task = asyncio.create_task(process_with_tracing())
+                        task = asyncio.create_task(
+                            self._process_message_with_tracing(config, message)
+                        )
                         self._processing_tasks.add(task)
-                        task.add_done_callback(self.cleanup_message_task)
+                        task.add_done_callback(
+                            partial(
+                                self.cleanup_message_task,
+                                config.queue_name,
+                            )
+                        )
 
                 # If we exit the loop normally (shutdown), break the reconnect loop
                 if self._shutdown_event.is_set():
