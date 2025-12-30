@@ -36,6 +36,56 @@ type S3Deps struct {
 	SSE       *s3types.ServerSideEncryption
 }
 
+// extMimeMap maps file extensions to more specific MIME types for text-based files.
+// Used when content-based detection returns "text/plain" but extension suggests a specific format.
+var extMimeMap = map[string]string{
+	".md":       "text/markdown",
+	".markdown": "text/markdown",
+	".yaml":     "text/yaml",
+	".yml":      "text/yaml",
+	".csv":      "text/csv",
+	".json":     "application/json",
+	".xml":      "application/xml",
+	".html":     "text/html",
+	".htm":      "text/html",
+	".css":      "text/css",
+	".js":       "text/javascript",
+	".ts":       "text/typescript",
+	".go":       "text/x-go",
+	".py":       "text/x-python",
+	".rs":       "text/x-rust",
+	".rb":       "text/x-ruby",
+	".java":     "text/x-java",
+	".c":        "text/x-c",
+	".cpp":      "text/x-c++",
+	".h":        "text/x-c",
+	".hpp":      "text/x-c++",
+	".sh":       "text/x-shellscript",
+	".bash":     "text/x-shellscript",
+	".sql":      "text/x-sql",
+	".toml":     "text/x-toml",
+	".ini":      "text/x-ini",
+	".cfg":      "text/x-ini",
+	".conf":     "text/x-ini",
+}
+
+// detectMimeType detects the MIME type from file content, with extension-based refinement
+// for text files where content detection alone cannot distinguish formats.
+func detectMimeType(content []byte, ext string) string {
+	contentType := mimetype.Detect(content).String()
+
+	// For plain text, refine based on file extension since content detection
+	// cannot distinguish between markdown, yaml, code files, etc.
+	if strings.HasPrefix(contentType, "text/plain") {
+		if refined, ok := extMimeMap[ext]; ok {
+			// Replace "text/plain" with refined type, preserving charset parameters
+			result := strings.Replace(contentType, "text/plain", refined, 1)
+			return result
+		}
+	}
+	return contentType
+}
+
 func NewS3(ctx context.Context, cfg *config.Config) (*S3Deps, error) {
 	loadOpts := []func(*awsCfg.LoadOptions) error{
 		awsCfg.WithRegion(cfg.S3.Region),
@@ -280,8 +330,8 @@ func (u *S3Deps) UploadFormFile(ctx context.Context, keyPrefix string, fh *multi
 
 	ext := strings.ToLower(filepath.Ext(fh.Filename))
 
-	// Detect MIME type from file content (don't trust client-provided Content-Type)
-	contentType := mimetype.Detect(fileContent).String()
+	// Detect MIME type from file content, with extension-based refinement for text files
+	contentType := detectMimeType(fileContent, ext)
 
 	return u.uploadWithDedup(
 		ctx,
