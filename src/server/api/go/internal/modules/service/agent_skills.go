@@ -17,6 +17,8 @@ import (
 	"github.com/memodb-io/Acontext/internal/modules/model"
 	"github.com/memodb-io/Acontext/internal/modules/repo"
 	"github.com/memodb-io/Acontext/internal/pkg/paging"
+	"github.com/memodb-io/Acontext/internal/pkg/utils/fileparser"
+	"github.com/memodb-io/Acontext/internal/pkg/utils/mime"
 	"gopkg.in/yaml.v3"
 	"gorm.io/datatypes"
 )
@@ -29,6 +31,7 @@ type AgentSkillsService interface {
 	Delete(ctx context.Context, projectID uuid.UUID, id uuid.UUID) error
 	List(ctx context.Context, in ListAgentSkillsInput) (*ListAgentSkillsOutput, error)
 	GetPresignedURL(ctx context.Context, agentSkills *model.AgentSkills, filePath string, expire time.Duration) (string, error)
+	GetFile(ctx context.Context, projectID uuid.UUID, skillName string, filePath string, expire time.Duration) (*GetFileOutput, error)
 }
 
 type agentSkillsService struct {
@@ -253,7 +256,7 @@ func (s *agentSkillsService) Create(ctx context.Context, in CreateAgentSkillsInp
 	}
 
 	// Process zip files and upload to S3 first
-	fileIndex := make([]string, 0)
+	fileIndex := make([]model.FileInfo, 0)
 	var baseBucket string
 
 	for _, file := range zipReader.File {
@@ -286,18 +289,8 @@ func (s *agentSkillsService) Create(ctx context.Context, in CreateAgentSkillsInp
 			return nil, fmt.Errorf("read file in zip: %w", err)
 		}
 
-		// Determine content type
-		contentType := "application/octet-stream"
-		if ext := filepath.Ext(file.Name); ext != "" {
-			switch strings.ToLower(ext) {
-			case ".json":
-				contentType = "application/json"
-			case ".txt":
-				contentType = "text/plain"
-			case ".md":
-				contentType = "text/markdown"
-			}
-		}
+		// Detect MIME type from file content, with extension-based refinement for text files
+		contentType := mime.DetectMimeType(fileContent, file.Name)
 
 		// Upload to S3: baseS3Key/{relativePath}
 		// Strip the zip package's outer directory and use skillName as root
@@ -318,9 +311,12 @@ func (s *agentSkillsService) Create(ctx context.Context, in CreateAgentSkillsInp
 			baseBucket = asset.Bucket
 		}
 
-		// Add to file index: relative path from skillName root
-		// Example: if zip has "random-name/SKILL.md", FileIndex stores "SKILL.md"
-		fileIndex = append(fileIndex, relativePath)
+		// Add to file index: relative path and MIME type from skillName root
+		// Example: if zip has "random-name/SKILL.md", FileIndex stores {"path": "SKILL.md", "mime": "text/markdown"}
+		fileIndex = append(fileIndex, model.FileInfo{
+			Path: relativePath,
+			MIME: contentType,
+		})
 	}
 
 	// Create base AssetMeta pointing to the base directory
@@ -462,8 +458,8 @@ func (s *agentSkillsService) GetPresignedURL(ctx context.Context, agentSkills *m
 	// Find file in file index
 	fileIndex := agentSkills.FileIndex.Data()
 	var found bool
-	for _, path := range fileIndex {
-		if path == filePath {
+	for _, fileInfo := range fileIndex {
+		if fileInfo.Path == filePath {
 			found = true
 			break
 		}
@@ -475,4 +471,69 @@ func (s *agentSkillsService) GetPresignedURL(ctx context.Context, agentSkills *m
 	// Get full S3 key by combining base AssetMeta S3Key with relative path
 	fullS3Key := agentSkills.GetFileS3Key(filePath)
 	return s.s3.PresignGet(ctx, fullS3Key, expire)
+}
+
+type GetFileOutput struct {
+	Path    string                  `json:"path"`
+	MIME    string                  `json:"mime"`
+	Content *fileparser.FileContent `json:"content,omitempty"` // Present if file is text-based and parseable
+	URL     *string                 `json:"url,omitempty"`     // Present if file is not text-based or not parseable
+}
+
+func (s *agentSkillsService) GetFile(ctx context.Context, projectID uuid.UUID, skillName string, filePath string, expire time.Duration) (*GetFileOutput, error) {
+	// Get agent skills by name
+	agentSkills, err := s.r.GetByName(ctx, projectID, skillName)
+	if err != nil {
+		return nil, fmt.Errorf("get agent_skills by name: %w", err)
+	}
+
+	// Find file in file index
+	fileIndex := agentSkills.FileIndex.Data()
+	var fileInfo *model.FileInfo
+	for i := range fileIndex {
+		if fileIndex[i].Path == filePath {
+			fileInfo = &fileIndex[i]
+			break
+		}
+	}
+	if fileInfo == nil {
+		return nil, fmt.Errorf("file path '%s' not found in agent_skills", filePath)
+	}
+
+	// Get full S3 key
+	fullS3Key := agentSkills.GetFileS3Key(filePath)
+
+	// Check if file type is parseable
+	parser := fileparser.NewFileParser()
+	filename := filepath.Base(filePath)
+	canParse := parser.CanParseFile(filename, fileInfo.MIME)
+
+	output := &GetFileOutput{
+		Path: fileInfo.Path,
+		MIME: fileInfo.MIME,
+	}
+
+	if canParse {
+		// Download and parse file content
+		content, err := s.s3.DownloadFile(ctx, fullS3Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to download file content: %w", err)
+		}
+
+		fileContent, err := parser.ParseFile(filename, fileInfo.MIME, content)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse file content: %w", err)
+		}
+
+		output.Content = fileContent
+	} else {
+		// Generate presigned URL for non-text files
+		url, err := s.s3.PresignGet(ctx, fullS3Key, expire)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate presigned URL: %w", err)
+		}
+		output.URL = &url
+	}
+
+	return output, nil
 }
